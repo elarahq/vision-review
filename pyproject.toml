@@ -16,4 +16,5 @@ dependencies = [
     "gspread>=6.0.0",
     "google-auth>=2.0.0",
     "sse-starlette>=3.3.2",
+    "json5>=0.13.0",
 ]
