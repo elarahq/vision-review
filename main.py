@@ -17,12 +17,16 @@ app = FastAPI()
 # Track PRs currently being reviewed to prevent duplicate processing
 _active_reviews: set[str] = set()
 
+# Comments below this confidence (Claude's self-rated 0-100) are dropped as likely assumption-based.
+CONFIDENCE_THRESHOLD = 80
+
 @app.post("/webhook")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     
     # Get payload and signature
     payload = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
+    event_type = request.headers.get("X-GitHub-Event")
 
     # Verify signature
     if not verify_signature(payload=payload, signature=signature):
@@ -32,26 +36,22 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     data = json.loads(payload)
 
     # Filter PR events
-    event_type = request.headers.get("X-GitHub-Event")
     if event_type != "pull_request":
-        print({"status": "ignored", "reason": "not a PR event"})
         return {"status": "ignored", "reason": "not a PR event"}
 
     action = data.get("action")
+    sender = data.get("sender", {}).get("login")
+    requested_reviewer_name = data.get("requested_reviewer", {}).get("login")
+    agent_reviewer_name = os.environ.get("GITHUB_USERNAME")
+
     if action != "review_requested":
-        print({"status": "ignored", "reason": f"action {action} ignored"})
         return {"status": "ignored", "reason": f"action {action} ignored"}
 
-    # Ignore events triggered by our own bot
-    sender = data.get("sender", {}).get("login")
-    agent_reviewer_name = os.environ.get("GITHUB_USERNAME")
-    if sender == agent_reviewer_name:
-        print({"status": "ignored", "reason": "event triggered by bot itself"})
-        return {"status": "ignored", "reason": "event triggered by bot itself"}
+    # Ignore events triggered by our own bot (temporarily disabled for testing)
+    # if sender == agent_reviewer_name:
+    #     return {"status": "ignored", "reason": "event triggered by bot itself"}
 
-    requested_reviewer_name = data.get("requested_reviewer", {}).get("login")
     if requested_reviewer_name != agent_reviewer_name:
-        print({"status": "ignored", "reason": f"requested reviewer is not {agent_reviewer_name}"})
         return {"status": "ignored", "reason": f"requested reviewer is not {agent_reviewer_name}"}
 
     pr_number = data["pull_request"]["number"]
@@ -59,7 +59,6 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
     review_key = f"{repo}#{pr_number}"
     if review_key in _active_reviews:
-        print({"status": "ignored", "reason": f"review already in progress for {review_key}"})
         return {"status": "ignored", "reason": "review already in progress"}
 
     print(f"Reviewing PR #{pr_number} from {repo}")
@@ -75,6 +74,23 @@ def _count_severities(comments: list) -> dict:
         if severity in counts:
             counts[severity] += 1
     return counts
+
+def _filter_by_confidence(comments: list, threshold: int = CONFIDENCE_THRESHOLD) -> list:
+    kept = []
+    print(f"Confidence filter (threshold={threshold}):")
+    for i, c in enumerate(comments):
+        conf = c.get("confidence", 0)
+        sev = c.get("severity", "?")
+        path = c.get("path", "?")
+        line = c.get("line", "?")
+        if conf >= threshold:
+            print(f"  KEPT [{i}]  {sev} | {path}:{line} | confidence={conf}")
+            kept.append(c)
+        else:
+            print(f"  DROP [{i}]  {sev} | {path}:{line} | confidence={conf} — assumption")
+    print(f"Filter summary: {len(kept)} kept, {len(comments) - len(kept)} dropped (from {len(comments)})")
+    return kept
+
 
 def _prioritize_comments(comments: list, max_comments: int = 40) -> list:
     highs = [c for c in comments if c.get("severity", "").upper() == "HIGH"]
@@ -98,11 +114,13 @@ def process_review(repo: str, pr_number: int):
     try:
         github_service = GithubRepoService()
         pr_data = github_service.fetch_pr_data(repo=repo, pr_number=pr_number)
-        
+
         claude_service = ClaudeService()
-        print("Reviewing PR with claude")  
+        print("Reviewing PR with claude")
         comments = claude_service.review_pr(pr_data=pr_data, repo=repo, github_service=github_service)
         print(f"Found {len(comments)} issues")
+
+        comments = _filter_by_confidence(comments)
 
         comments = _prioritize_comments(comments, max_comments=40)
 
