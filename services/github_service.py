@@ -80,7 +80,7 @@ class GithubRepoService(GithubService):
                     # Snap to nearest valid line
                     line = min(valid_lines, key=lambda x: abs(x - line))
                 review_comments.append({"path": path, "line": line, "body": body})
-        
+
         if review_comments:
             try:
                 pr.create_review(

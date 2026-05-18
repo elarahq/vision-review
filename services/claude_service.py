@@ -5,12 +5,25 @@ from typing import Literal
 import json
 import json5
 import os
+import re
 
 
 class ReviewComment(BaseModel):
     path: str = Field(description="Repository-relative file path, e.g. 'app/services/foo.py'.")
     line: int = Field(description="1-based line number in the file the comment refers to.")
     severity: Literal["HIGH", "MEDIUM", "LOW"] = Field(description="Severity of the issue.")
+    confidence: int = Field(
+        ge=0,
+        le=100,
+        description=(
+            "Self-rated confidence (0-100) that this comment is correct and NOT assumption-based. "
+            "80-100 = very sure, the issue is directly visible in the code; definitely not an assumption. "
+            "60-79 = sure, but could still be an assumption; the pattern looks wrong but proving it needs some reasoning. "
+            "Below 60 = definitely an assumption; depends on caller behavior, runtime data, intent, or code outside what you reviewed. "
+            "Lower this value if you used hedging words (check, verify, ensure, make sure, assert, should) or any conditional phrasing like 'if X is Y, then...'. "
+            "Do not inflate this number — your output is audited and overconfident findings will be rejected."
+        ),
+    )
     body: str = Field(
         description=(
             "Plain-text review comment. May contain code snippets, regex (\\d, \\s), "
@@ -18,6 +31,7 @@ class ReviewComment(BaseModel):
             "schema handles escaping. Do NOT wrap the value in extra quotes."
         )
     )
+
 
 class ReviewResponse(BaseModel):
     comments: list[ReviewComment] = Field(
@@ -38,6 +52,7 @@ class ReviewResponse(BaseModel):
         except json.JSONDecodeError as e:
             print(f"Strict JSON parse failed ({e}); retrying with lenient json5 parser")
             return json5.loads(v)
+
 
 GUIDELINES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "guidelines")
 
@@ -200,22 +215,83 @@ class ClaudeService:
         formatted_files = []
 
         for file in files:
+            annotated_patch = self._annotate_patch(file.get("patch") or "")
+
             file_text = f"""
                 {'='*60}
                 FILE: {file.get("filename")}
                 {'='*60}
 
-                CHANGES (DIFF):
-                {file.get("patch")}"""
+                CHANGES (DIFF) — each line prefixed with its line number. ":" = context, "+" = added, "-" = deleted.
+                {annotated_patch}"""
 
             if not patch_only:
+                full_content = file.get("full_content")
+                annotated_full = self._annotate_full_file(full_content) if full_content else "[Content not available]"
                 file_text += f"""
 
                 {'~'*60}
-                FULL FILE CONTEXT:
+                FULL FILE CONTEXT — each line prefixed with its line number.
                 {'~'*60}
-                {file.get("full_content") if file.get("full_content") else "[Content not available]"}"""
+                {annotated_full}"""
 
             formatted_files.append(file_text)
 
         return "\n\n".join(formatted_files)
+
+    def _annotate_full_file(self, content: str) -> str:
+        """Prefix every line with its 1-indexed line number, e.g. '15: def foo():'."""
+        if not content:
+            return content
+        lines = content.split("\n")
+        return "\n".join(f"{i + 1}: {line}" for i, line in enumerate(lines))
+
+    def _annotate_patch(self, patch: str) -> str:
+        """
+        Annotate each line of a unified diff with its line number, using dual counters
+        for the old and new files. Hunk headers are kept as-is.
+
+        Output format per line:
+          "15: def foo():"          -- context line at new-file line 15
+          "16+ if x is None:"       -- added line at new-file line 16
+          "11- if x < 0:"           -- deleted line at old-file line 11
+        """
+        if not patch:
+            return patch
+
+        annotated = []
+        old_line = None
+        new_line = None
+
+        for line in patch.split("\n"):
+            hunk_match = re.match(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+            if hunk_match:
+                old_line = int(hunk_match.group(1))
+                new_line = int(hunk_match.group(2))
+                annotated.append(line)
+                continue
+
+            # Lines before the first hunk header (file headers etc.) pass through unchanged.
+            if old_line is None or new_line is None:
+                annotated.append(line)
+                continue
+
+            # "\ No newline at end of file" marker — pass through, do not increment.
+            if line.startswith("\\"):
+                annotated.append(line)
+                continue
+
+            if line.startswith("+"):
+                annotated.append(f"{new_line}+ {line[1:]}")
+                new_line += 1
+            elif line.startswith("-"):
+                annotated.append(f"{old_line}- {line[1:]}")
+                old_line += 1
+            else:
+                content = line[1:] if line.startswith(" ") else line
+                annotated.append(f"{new_line}: {content}")
+                old_line += 1
+                new_line += 1
+
+        return "\n".join(annotated)
+

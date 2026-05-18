@@ -58,10 +58,25 @@ Every comment must be a **definitive finding** — state what IS wrong and what 
 - "Consider...", "You might want to...", "It might be worth..."
 - "Potentially", "Appears to", "Seems like", "Could possibly"
 
-**Every comment must include:**
-1. What the problem is
-2. Why it matters (consequence in production)
-3. How to fix it (concrete code or specific steps)
+**Every comment must use this two-part format:**
+
+First line: Cause category (max 2-3 words) — a short label describing the kind of issue.
+Second part: **Fix:** section describing the ACTION to take (target 20 words, hard max 25) plus optional code block.
+
+No Reason section. Severity tag and Cause category communicate impact.
+
+**The Fix prose states the action to take, not the bug mechanism.** Do NOT explain what's wrong or how the bug happens — the Cause category covers that. State only what the developer should do.
+
+Wrong: "Setting delegate = nil inside the completion block races with locationDidUpdateToLocation, firing the method twice." — describes the mechanism, not the action.
+Right: "Remove the delegate = nil assignment from the completion block." — imperative action only.
+
+Do NOT put fix instructions as comments inside the code block. The Fix prose states the action; the code block shows the corrected code without explanatory comments.
+
+Target 20 words for the Fix explanation. If you're mid-sentence at word 20, finish the sentence — but never exceed 25 words. Never leave a trailing fragment. Code snippets don't count toward the word limit.
+
+Use plain, everyday English — write like you're explaining to a teammate, not writing a paper. Avoid jargon unless it's a standard term the dev already knows (e.g. "race condition" is fine, "temporal coupling" is not).
+
+**ONE issue per comment.** If you find multiple problems on the same line or in the same block, create SEPARATE comments — do not combine them. The Fix section must propose exactly ONE concrete change, not a list of options ("do X or Y") or multiple related changes bundled together.
 
 If you cannot write a comment as a definitive assertion, skip it. False positives are worse than missed issues.
 
@@ -71,43 +86,39 @@ If you cannot write a comment as a definitive assertion, skip it. False positive
 
 ## Output Format
 
-Each finding uses this structure:
+Each finding uses this two-part structure (severity is added automatically by the system — do NOT include it in the body):
 
 ```
-**[SEVERITY] Category — Short Title**
-`path/to/file.ext` line N
+<Cause category — max 2-3 words>
 
-❌ **Problem:** One sentence stating what is wrong and why it matters in production.
-```language
-// the bad code
+**Fix:** <action to take, target 20 words, hard max 25> + optional code
 ```
 
-✅ **Fix:** One sentence stating the correct approach.
-```language
-// the correct code
-```
-```
+The Cause category is a short label describing the kind of issue. Examples: "Memory Leak", "SQL Injection", "Missing Weak Self", "Race Condition", "Unused Import", "Missing Error Handling", "Force Unwrap", "Hardcoded Secret", "DI Violation", "Main Thread Block". Pick the most specific fitting category; invent new ones when the existing ones don't fit.
 
-**Example:**
+No Reason section — severity and Cause category already communicate impact.
+
+**Example (inline fix):**
 
 ---
 
-**[HIGH] Security — SQL Injection**
-`api/users.py` line 45
+SQL Injection
 
-❌ **Problem:** User input is concatenated directly into the SQL query — any attacker can read or destroy the entire database.
-```python
-query = f"SELECT * FROM users WHERE name = '{user_input}'"
-```
-
-✅ **Fix:** Use a parameterized query so the database driver handles escaping.
-```python
-cursor.execute("SELECT * FROM users WHERE name = ?", (user_input,))
-```
+**Fix:** Use a parameterized query: `cursor.execute("SELECT * FROM users WHERE name = ?", (user_input,))`
 
 ---
 
-**For findings without a code fix** (e.g. missing tests, architectural issues), omit the code blocks and use plain text for the Fix section.
+**Example (multi-line fix):**
+
+Main Thread Block
+
+**Fix:** Move the network call to a background queue and dispatch UI updates back to main.
+```swift
+DispatchQueue.global().async {
+    let data = fetchData()
+    DispatchQueue.main.async { self.updateUI(data) }
+}
+```
 
 Group findings by severity: all HIGH first, then MEDIUM, then LOW.
 
