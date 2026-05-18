@@ -1,29 +1,46 @@
 from langchain_anthropic import ChatAnthropic
 from prompts.code_review import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT, PATCH_ONLY_ADDENDUM
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 import json
+import json5
 import os
 import re
 
 
 class ReviewComment(BaseModel):
-    path: str
-    line: int
-    severity: Literal["HIGH", "MEDIUM", "LOW"]
+    path: str = Field(description="Repository-relative file path, e.g. 'app/services/foo.py'.")
+    line: int = Field(description="1-based line number in the file the comment refers to.")
+    severity: Literal["HIGH", "MEDIUM", "LOW"] = Field(description="Severity of the issue.")
     confidence: int  # 0-100: how confident Claude is that this comment is correct and not assumption-based
-    body: str
+    body: str = Field(
+        description=(
+            "Plain-text review comment. May contain code snippets, regex (\\d, \\s), "
+            "or path fragments — emit them as literal characters; the tool input "
+            "schema handles escaping. Do NOT wrap the value in extra quotes."
+        )
+    )
 
 
 class ReviewResponse(BaseModel):
-    comments: list[ReviewComment]
+    comments: list[ReviewComment] = Field(
+        description=(
+            "List of review comment objects. MUST be a native JSON array of objects, "
+            "not a stringified JSON blob."
+        )
+    )
 
     @field_validator("comments", mode="before")
     @classmethod
     def parse_comments_string(cls, v):
-        if isinstance(v, str):
+        if not isinstance(v, str):
+            return v
+        print("Warning: 'comments' arrived as a string — model stringified the array. Recovering.")
+        try:
             return json.loads(v)
-        return v
+        except json.JSONDecodeError as e:
+            print(f"Strict JSON parse failed ({e}); retrying with lenient json5 parser")
+            return json5.loads(v)
 
 
 GUIDELINES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "guidelines")
@@ -53,7 +70,10 @@ sonnet_4_5 = "claude-sonnet-4-5-20250929"
 class ClaudeService:
     def __init__(self):
         self.llm = ChatAnthropic(model=sonnet_4_6, temperature=0, max_tokens=16384)
-        self.structured_llm = self.llm.with_structured_output(ReviewResponse)
+        self.structured_llm = self.llm.with_structured_output(
+            ReviewResponse,
+            method="function_calling",
+        )
 
     def review_pr(self, pr_data: dict, repo: str, github_service) -> list:
         patch_only = pr_data.get("patch_only", False)
