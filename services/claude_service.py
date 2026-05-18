@@ -12,7 +12,18 @@ class ReviewComment(BaseModel):
     path: str = Field(description="Repository-relative file path, e.g. 'app/services/foo.py'.")
     line: int = Field(description="1-based line number in the file the comment refers to.")
     severity: Literal["HIGH", "MEDIUM", "LOW"] = Field(description="Severity of the issue.")
-    confidence: int  # 0-100: how confident Claude is that this comment is correct and not assumption-based
+    confidence: int = Field(
+        ge=0,
+        le=100,
+        description=(
+            "Self-rated confidence (0-100) that this comment is correct and NOT assumption-based. "
+            "80-100 = very sure, the issue is directly visible in the code; definitely not an assumption. "
+            "60-79 = sure, but could still be an assumption; the pattern looks wrong but proving it needs some reasoning. "
+            "Below 60 = definitely an assumption; depends on caller behavior, runtime data, intent, or code outside what you reviewed. "
+            "Lower this value if you used hedging words (check, verify, ensure, make sure, assert, should) or any conditional phrasing like 'if X is Y, then...'. "
+            "Do not inflate this number — your output is audited and overconfident findings will be rejected."
+        ),
+    )
     body: str = Field(
         description=(
             "Plain-text review comment. May contain code snippets, regex (\\d, \\s), "
